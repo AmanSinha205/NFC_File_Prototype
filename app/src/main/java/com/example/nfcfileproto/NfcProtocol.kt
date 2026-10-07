@@ -2,6 +2,7 @@ package com.example.nfcfileproto
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.util.Locale
 
 /**
  * NfcProtocol: Defines the custom ISO-DEP APDU protocol constants and helper serializers
@@ -34,10 +35,11 @@ object NfcProtocol {
     val STATUS_FAILED = byteArrayOf(0x6F.toByte(), 0x00.toByte())
 
     /**
-     * Chunk payload size (200 bytes).
-     * Conservative size to fit well within standard short APDU buffer limits (255 bytes).
+     * Chunk payload size (240 bytes).
+     * Maximizes throughput while remaining safely within the universal 255-byte short APDU limit.
+     * APDU structure: 4-byte header + 1-byte Lc + 4-byte index + 2-byte len + 240-byte data = 251 bytes <= 255.
      */
-    const val CHUNK_DATA_SIZE = 200
+    const val CHUNK_DATA_SIZE = 240
 
     /**
      * Helper to verify if an APDU response ends with 0x90 0x00 (SUCCESS).
@@ -50,18 +52,29 @@ object NfcProtocol {
     }
 
     /**
+     * Formats status words or raw bytes to readable hex string.
+     */
+    fun bytesToHex(bytes: ByteArray?): String {
+        if (bytes == null) return "null"
+        return bytes.joinToString(" ") { "%02X".format(it) }
+    }
+
+    /**
      * Builds standard SELECT AID command APDU:
      * Header: CLA=0x00, INS=0xA4, P1=0x04, P2=0x00, Lc=AID length, Data=AID
+     * Standard ISO 7816-4 Case 3 APDU (without Le by default, or with Le if specified).
      */
-    fun buildSelectAidApdu(): ByteArray {
+    fun buildSelectAidApdu(withLe: Boolean = false): ByteArray {
         val out = ByteArrayOutputStream()
         out.write(0x00) // CLA: Standard class
         out.write(0xA4) // INS: SELECT FILE / APPLICATION
         out.write(0x04) // P1: Select by DF name (AID)
         out.write(0x00) // P2: First or only occurrence
-        out.write(AID_BYTES.size) // Lc: Length of AID
+        out.write(AID_BYTES.size) // Lc: Length of AID (7)
         out.write(AID_BYTES)      // Data: AID bytes
-        out.write(0x00)           // Le: Expected response length
+        if (withLe) {
+            out.write(0x00)       // Le: Expected response length
+        }
         return out.toByteArray()
     }
 
@@ -72,10 +85,11 @@ object NfcProtocol {
      * - Total Chunks: 4 bytes (Int)
      * - File Size (bytes): 4 bytes (Int)
      * - File Name Length: 2 bytes (Short)
-     * - File Name: UTF-8 encoded bytes
+     * - File Name: UTF-8 encoded bytes (capped at 80 bytes)
      */
     fun buildStartTransferApdu(fileName: String, fileSize: Int, totalChunks: Int): ByteArray {
-        val nameBytes = fileName.toByteArray(Charsets.UTF_8)
+        val safeName = if (fileName.length > 80) fileName.take(80) else fileName
+        val nameBytes = safeName.toByteArray(Charsets.UTF_8)
         val dataBuf = ByteBuffer.allocate(4 + 4 + 2 + nameBytes.size)
         dataBuf.putInt(totalChunks)
         dataBuf.putInt(fileSize)
@@ -90,7 +104,6 @@ object NfcProtocol {
         out.write(0x00) // P2
         out.write(data.size) // Lc
         out.write(data)
-        out.write(0x00) // Le
         return out.toByteArray()
     }
 
@@ -140,7 +153,6 @@ object NfcProtocol {
         out.write(0x00)
         out.write(data.size)
         out.write(data)
-        out.write(0x00)
         return out.toByteArray()
     }
 
@@ -167,7 +179,7 @@ object NfcProtocol {
 
     /**
      * Builds COMPLETE_TRANSFER command APDU:
-     * Header: CLA=0x80, INS=0x03, P1=0x00, P2=0x00, Lc=0, Le=0
+     * Header: CLA=0x80, INS=0x03, P1=0x00, P2=0x00, Lc=0
      */
     fun buildCompleteTransferApdu(): ByteArray {
         val out = ByteArrayOutputStream()
@@ -176,8 +188,18 @@ object NfcProtocol {
         out.write(0x00)
         out.write(0x00)
         out.write(0x00) // Lc: 0
-        out.write(0x00) // Le
         return out.toByteArray()
+    }
+
+    /**
+     * Format byte count into human readable format (KB, MB).
+     */
+    fun formatFileSize(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
+            else -> String.format(Locale.US, "%.2f MB", bytes / (1024.0 * 1024.0))
+        }
     }
 
     /**

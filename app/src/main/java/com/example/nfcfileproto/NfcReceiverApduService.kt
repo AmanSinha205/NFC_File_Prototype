@@ -1,9 +1,13 @@
 package com.example.nfcfileproto
 
+import android.content.ContentValues
 import android.nfc.cardemulation.HostApduService
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
+import android.webkit.MimeTypeMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.ByteArrayOutputStream
@@ -14,7 +18,7 @@ import java.io.FileOutputStream
  * NfcReceiverApduService:
  * Implements Android's Host-based Card Emulation (HCE).
  *
- * When this device (Phone B) is held near an NFC reader (Phone A),
+ * When this device (Phone B) is set to Receive mode and held near an NFC reader (Phone A),
  * Android routes incoming APDUs targeting our AID ("F0010203040506")
  * to this service via [processCommandApdu].
  *
@@ -22,7 +26,7 @@ import java.io.FileOutputStream
  * 1. AID SELECT command (returns 0x90 0x00 OK)
  * 2. INS_START_TRANSFER (extracts metadata: fileName, totalChunks, fileSize)
  * 3. INS_SEND_CHUNK (accumulates binary chunks and returns 0x90 0x00 ACK)
- * 4. INS_COMPLETE_TRANSFER (writes accumulated file to Downloads and notifies UI)
+ * 4. INS_COMPLETE_TRANSFER (writes accumulated file to storage, copies to Downloads, and notifies UI)
  */
 class NfcReceiverApduService : HostApduService() {
 
@@ -31,12 +35,15 @@ class NfcReceiverApduService : HostApduService() {
 
         // State observable by the UI
         data class ReceiverState(
-            val status: String = "Idle (Ready to receive via NFC)",
+            val status: String = "Ready to receive via NFC",
             val currentFileName: String? = null,
             val currentChunk: Int = 0,
             val totalChunks: Int = 0,
+            val fileSize: Int = 0,
             val isTransferActive: Boolean = false,
             val savedFilePath: String? = null,
+            val savedFile: File? = null,
+            val mimeType: String? = null,
             val hasError: Boolean = false
         )
 
@@ -68,7 +75,7 @@ class NfcReceiverApduService : HostApduService() {
         if (ins == NfcProtocol.INS_SELECT) {
             Log.d(TAG, "SELECT AID command received. Acknowledging connection.")
             _stateFlow.value = ReceiverState(
-                status = "NFC Connected! Waiting for transfer...",
+                status = "NFC Connected! Starting file transfer...",
                 isTransferActive = true
             )
             return NfcProtocol.STATUS_SUCCESS
@@ -100,6 +107,8 @@ class NfcReceiverApduService : HostApduService() {
                         currentFileName = metadata.fileName,
                         currentChunk = 0,
                         totalChunks = metadata.totalChunks,
+                        fileSize = metadata.fileSize,
+                        mimeType = getMimeType(metadata.fileName),
                         isTransferActive = true
                     )
                     NfcProtocol.STATUS_SUCCESS
@@ -118,7 +127,7 @@ class NfcReceiverApduService : HostApduService() {
 
                     // Update UI state with current progress
                     _stateFlow.value = _stateFlow.value.copy(
-                        status = "Receiving chunk ${chunk.chunkIndex + 1}/$totalExpectedChunks",
+                        status = "Receiving chunk ${chunk.chunkIndex + 1}/$totalExpectedChunks (${NfcProtocol.formatFileSize(fileBuffer.size().toLong())})",
                         currentChunk = chunk.chunkIndex + 1
                     )
                     // Return ACK (0x90 0x00) so sender can proceed to next chunk
@@ -134,13 +143,17 @@ class NfcReceiverApduService : HostApduService() {
                 Log.d(TAG, "COMPLETE_TRANSFER received. Saving file...")
                 val savedFile = saveFileToDisk()
                 if (savedFile != null) {
+                    val mime = getMimeType(savedFile.name)
                     _stateFlow.value = ReceiverState(
-                        status = "✅ File Saved: ${savedFile.name} (${savedFile.length()} bytes)",
+                        status = "✅ File Received: ${savedFile.name} (${NfcProtocol.formatFileSize(savedFile.length())})",
                         currentFileName = savedFile.name,
                         currentChunk = totalExpectedChunks,
                         totalChunks = totalExpectedChunks,
+                        fileSize = savedFile.length().toInt(),
                         isTransferActive = false,
-                        savedFilePath = savedFile.absolutePath
+                        savedFilePath = savedFile.absolutePath,
+                        savedFile = savedFile,
+                        mimeType = mime
                     )
                     NfcProtocol.STATUS_SUCCESS
                 } else {
@@ -170,16 +183,62 @@ class NfcReceiverApduService : HostApduService() {
             if (!downloadsDir.exists()) downloadsDir.mkdirs()
 
             val targetFile = File(downloadsDir, fileName)
+            val bytes = fileBuffer.toByteArray()
             FileOutputStream(targetFile).use { fos ->
-                fos.write(fileBuffer.toByteArray())
+                fos.write(bytes)
                 fos.flush()
             }
             Log.d(TAG, "File written successfully to ${targetFile.absolutePath}")
+
+            // Also copy to public Downloads so user can find it outside the app
+            saveToPublicDownloads(fileName, bytes)
+
             targetFile
         } catch (e: Exception) {
             Log.e(TAG, "Error writing file to disk", e)
             null
         }
+    }
+
+    private fun saveToPublicDownloads(fileName: String, bytes: ByteArray) {
+        try {
+            val mime = getMimeType(fileName)
+            val resolver = applicationContext.contentResolver
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            }
+
+            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+            } else {
+                resolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
+            }
+
+            uri?.let { targetUri ->
+                resolver.openOutputStream(targetUri)?.use { out ->
+                    out.write(bytes)
+                    out.flush()
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(targetUri, contentValues, null, null)
+                }
+                Log.d(TAG, "File copied to public Downloads: $targetUri")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Notice: could not copy to public Downloads (${e.message}), file remains safely in app storage")
+        }
+    }
+
+    private fun getMimeType(fileName: String): String {
+        val extension = fileName.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "*/*"
     }
 
     /**
@@ -190,7 +249,7 @@ class NfcReceiverApduService : HostApduService() {
         Log.d(TAG, "HCE Deactivated: $reasonStr")
         if (_stateFlow.value.isTransferActive && _stateFlow.value.currentChunk < _stateFlow.value.totalChunks) {
             _stateFlow.value = _stateFlow.value.copy(
-                status = "⚠️ Connection lost ($reasonStr). Please re-tap.",
+                status = "⚠️ Connection interrupted. Hold phones steady and re-tap.",
                 isTransferActive = false,
                 hasError = true
             )

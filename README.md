@@ -93,39 +93,35 @@ Only pure NFC permissions are required:
 
 ### Test Workflow
 1. **Open the app** on both Phone A and Phone B.
-2. **On Phone A (Sender):**
-   - Click **"Select File"**.
-   - Choose a small test file (e.g., a `.txt` note, small `.json`, or small image under ~100–300 KB).
-   - Phone A displays: *"File ready. Bring phones back-to-back to transfer via NFC."* with progress indicator set to 0%.
-3. **On Phone B (Receiver):**
-   - Keep the app open on the screen. The receiver card indicates: *"Idle (Ready to receive via NFC)"*.
+2. **On Phone B (Receiver):**
+   - Keep the app on **📥 Receive Mode** (default).
+   - Phone B disables Reader mode polling (preventing RF interference) and claims HCE priority via `CardEmulation.setPreferredService`.
+   - Displays: *"Ready to receive via NFC"*.
+3. **On Phone A (Sender):**
+   - Select **📤 Send Mode** (or click **"Select File"**).
+   - Choose any file &ndash; image, PDF, note, etc.
+   - For images, an optional **"Optimize image"** toggle is enabled to downscale large camera photos to ~80–120 KB for instant 3-second NFC transfer.
+   - Phone A displays: *"Ready to send! Hold phones back-to-back with Receiver phone."*
 4. **Initiate Transfer:**
-   - Bring Phone A and Phone B back-to-back so their NFC antennas align (usually located near the rear camera bump or center back).
-   - **Hold both devices still and steady** for a few seconds.
-   - You will see the chunk counter increment rapidly on both screens (`Receiving chunk 12/50`, etc.).
+   - Align the phones back-to-back near their NFC coils (typically near the camera bump or upper center).
+   - A haptic vibration confirms the connection.
+   - Chunks are streamed with automatic retries over ISO-DEP (`INS_SEND_CHUNK`).
 5. **Completion:**
-   - Phone A displays: `✅ Transfer Complete! (X bytes sent)`.
-   - Phone B displays: `✅ File Saved: filename (X bytes)` and provides the exact file path in the `Downloads` directory (`Android/data/com.example.nfcfileproto/files/Download/`).
+   - Both devices vibrate upon completion.
+   - Phone A shows: `✅ Transfer Complete!`.
+   - Phone B shows: `✅ File Received!`, displays image preview (if image), and provides **"Open File"** and **"Share"** buttons to open in Google Photos, PDF viewer, or system Files!
 
+---
 
-## Current Testing Status
+## 7. Resolution for SELECT AID Issue
 
-Prototype successfully builds and runs on:
-- OnePlus 13R (Sender)
-- Samsung Galaxy S23 FE (Receiver)
+Previously, transfers between OnePlus (Sender) and Samsung Galaxy (Receiver) failed at the `SELECT AID` step due to:
+1. **Dual-Reader RF Collisions**: Both phones had `enableReaderMode` polling simultaneously, preventing Samsung's NFC chip from acting as an HCE card target.
+2. **Missing Foreground HCE Priority**: Samsung Wallet/default NFC routing dropped proprietary `other` category AIDs without `CardEmulation.setPreferredService`.
+3. **APDU Framing**: Trailing `Le=0x00` in SELECT commands caused incompatibilities with certain chipsets.
 
-Current behaviour:
-- File selection works on sender.
-- NFC detects receiver device.
-- HCE service starts.
-- Transfer currently fails during SELECT AID handshake.
-
-Expected flow:
-Phone A selects file → NFC tap → Phone B receives file.
-
-Testing devices:
-Sender: OnePlus 13R
-Receiver: Samsung Galaxy S23 FE
-
-Issue:
-SELECT AID command returns failure during NFC connection.
+These have been resolved:
+- **Clean Mode Roles**: Phone B runs purely in Listen/HCE mode when in *Receive Mode*; Phone A runs as *Reader* when in *Send Mode*.
+- **Dynamic HCE Priority**: `CardEmulation.setPreferredService` forces direct AID routing to `NfcReceiverApduService`.
+- **Universal SELECT Framing & Retries**: Robust Case 3 APDU formatting with fallback, delay stabilization, and per-chunk packet retries.
+- **Direct View/Share**: Integrated `FileProvider` so received images and PDFs open directly in system viewers.

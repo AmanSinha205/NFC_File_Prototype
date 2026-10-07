@@ -106,3 +106,26 @@ Only pure NFC permissions are required:
 5. **Completion:**
    - Phone A displays: `✅ Transfer Complete! (X bytes sent)`.
    - Phone B displays: `✅ File Saved: filename (X bytes)` and provides the exact file path in the `Downloads` directory (`Android/data/com.example.nfcfileproto/files/Download/`).
+
+
+## Current Testing Status
+
+Prototype successfully builds and runs on:
+- OnePlus 13R (Sender)
+- Samsung Galaxy S23 FE (Receiver)
+
+Current behaviour:
+- File selection works on sender.
+- NFC detects receiver device.
+- HCE service starts.
+- Transfer currently fails during SELECT AID handshake.
+
+Expected flow:
+Phone A selects file → NFC tap → Phone B receives file.
+
+Testing devices:
+Sender: OnePlus 13R
+Receiver: Samsung Galaxy S23 FE
+
+Issue:
+SELECT AID command returns failure during NFC connection.
